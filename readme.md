@@ -1,4 +1,4 @@
-# Stripe Events to SQS Topic
+# Stripe Events to SNS Topic
 
 This SAM template sets up a complete serverless application to handle webhook events from Stripe, registers the webhook with stripe, and process events as needed. It provides a scalable and flexible architecture to integrate with Stripe and handle events efficiently. Webhook events from Stripe are published to an SNS (Simple Notification Service) topic.
 
