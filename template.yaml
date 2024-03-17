@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Stripe events to sqs queue
+
+Parameters:
+
+  StripeApiKey:
+    Type: String
+  WebhookEvents:
+    Type: String
+    Description: Comma delimited string array
+
+Resources:
+
+  StripeLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      ContentUri: layers/stripe
+      CompatibleRuntimes:
+        - python3.10
+    Metadata:
+      BuildMethod: python3.10
+
+  StripeEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-events
+
+  WebhookApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      Auth:
+        Authorizers:
+          StripeAuthorizer:
+            EnableSimpleResponses: true
+            AuthorizerPayloadFormatVersion: 2.0
+            FunctionArn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-stripe-authorizer
+
+  WebhookToSNS:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-stripe-webhook-to-sns
+      CodeUri: ./functions/webhook-to-sns
+      Runtime: python3.10
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Ref StripeLayer
+      Environment:
+        Variables:
+          SNS_TOPIC: !Ref StripeEventsTopic
+          STRIPE_API_KEY: !Ref StripeApiKey
+          STRIPE_SIGNING_SECRET_PARAM: !Sub /${AWS::StackName}/stripe-signing-key
+      Policies:
+        - arn:aws:iam::aws:policy/AmazonSNSFullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+      Events:
+        WebhookPost:
+          Type: HttpApi
+          Properties:
+            Path: /
+            Method: POST
+            ApiId: !Ref WebhookApi
+            Auth:
+              Authorizer: StripeAuthorizer # this only validates headers, not the payload
+
+  WebhookToSNSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${WebhookToSNS}"
+      RetentionInDays: 1
+  
+  WebhookSubscriptionManager:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-stripe-webhook-management
+      Runtime: python3.10
+      CodeUri: ./functions/stripe-subscription-manager
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Ref StripeLayer
+      Environment:
+        Variables:
+          STRIPE_API_KEY: !Ref StripeApiKey
+          WEBHOOK_EVENTS: !Ref WebhookEvents
+          API_ENDPOINT: !Sub 'https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/'
+
+  WebhookSubscriber:
+    Type: "Custom::WebhookSubscriptionManager"
+    Properties:
+      ServiceToken: !GetAtt WebhookSubscriptionManager.Arn
+
+  StripeSigningSecret:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${AWS::StackName}/stripe-signing-key
+      Description: Used to verify a stripe message signature
+      Type: String
+      Value: !GetAtt WebhookSubscriber.StripeSigningSecret
+
+  StripeAuthorizer:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-stripe-authorizer
+      CodeUri: ./functions/lambda-authorizer
+      Runtime: python3.10
+      Handler: lambda_function.lambda_handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+  
+  StripeAuthorizerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StripeAuthorizer}"
+      RetentionInDays: 1
+
+  StripeAuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StripeAuthorizer.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+Outputs:
+  
+  StripeWebhookUrl:
+    Value: !Sub 'https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/'
+    Description: "Endpoint to recieve messages from stripe"
+
+  StripeEventsTopic:
+    Value: !Ref StripeEventsTopic
+    Export:
+      Name: StripeEventsTopic
+
+    
+
